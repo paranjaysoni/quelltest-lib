@@ -189,7 +189,15 @@ class RuleEngine:
             unknown_types=unknown,
         )
 
-    def _must_return(self, req: Requirement) -> GeneratedTest:
+    def _must_return(self, req: Requirement) -> GeneratedTest | None:
+        sig = sig_inspector.inspect(req.target_function, req.target_file)
+
+        # If the return annotation allows None (Optional / X | None),
+        # a simple `assert result is not None` will fail on cache-miss / empty
+        # inputs — skip and let the report record it as unsupported.
+        if sig and _return_is_optional(sig.return_annotation):
+            return None
+
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
         setup = self._setup_lines(fixtures)
@@ -243,6 +251,18 @@ class RuleEngine:
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
+
+def _return_is_optional(annotation: str | None) -> bool:
+    """Return True if annotation allows None (Optional[X], X | None, None)."""
+    if annotation is None:
+        return False
+    ann = annotation.strip()
+    return (
+        ann == "None"
+        or ann.startswith(("Optional[", "typing.Optional["))
+        or ("|" in ann and "None" in [p.strip() for p in ann.split("|")])
+    )
+
 
 def _inject_boundary_value(call: str, description: str) -> str:
     """Replace the first numeric stub in call with a boundary-violating value."""

@@ -124,19 +124,11 @@ class Verifier:
         src = req.target_file.read_text()
 
         if req.constraint_kind == ConstraintKind.MUST_RAISE:
-            modified = re.sub(
-                r'(\s+)(raise \w+)', r'\1# QUELL_VIOLATION \2', src, count=1
-            )
+            modified = _violate_must_raise(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.BOUNDARY:
-            modified = re.sub(
-                r'((?:>|>=|<|<=)\s*)(\d+)',
-                lambda m: m.group(1) + "-9999",
-                src, count=1,
-            )
+            modified = _violate_boundary(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.MUST_RETURN:
-            modified = re.sub(
-                r'return (?!None)', 'return None  # QUELL_VIOLATION ', src, count=1
-            )
+            modified = _violate_must_return(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.MUTATION:
             try:
                 subprocess.run(
@@ -187,3 +179,68 @@ class Verifier:
 
     def _ms(self, start: float) -> int:
         return int((time.time() - start) * 1000)
+
+
+# ── targeted violation helpers ────────────────────────────────────────────────
+# Each helper targets ONLY the lines inside the named function, not the whole
+# file. This prevents the verifier from accidentally violating a different
+# function when multiple functions share the same pattern.
+
+import ast as _ast
+
+
+def _func_line_range(src: str, func_name: str) -> tuple[int, int] | None:
+    """Return (start_line, end_line) for func_name in src (1-indexed, inclusive)."""
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return None
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            if node.name == func_name:
+                end = getattr(node, "end_lineno", None)
+                if end:
+                    return (node.lineno, end)
+    return None
+
+
+def _violate_in_range(
+    src: str,
+    func_name: str,
+    pattern: str,
+    replacement: str,
+) -> str:
+    """Apply re.sub only within the lines of func_name."""
+    rng = _func_line_range(src, func_name)
+    if rng is None:
+        # Fallback: file-wide replacement (original behaviour)
+        return re.sub(pattern, replacement, src, count=1)
+
+    lines = src.splitlines(keepends=True)
+    start, end = rng[0] - 1, rng[1]  # convert to 0-indexed
+    func_block = "".join(lines[start:end])
+    modified_block = re.sub(pattern, replacement, func_block, count=1)
+    return "".join(lines[:start]) + modified_block + "".join(lines[end:])
+
+
+def _violate_must_raise(src: str, func_name: str) -> str:
+    return _violate_in_range(
+        src, func_name,
+        r'(\s+)(raise \w+)', r'\1# QUELL_VIOLATION \2',
+    )
+
+
+def _violate_boundary(src: str, func_name: str) -> str:
+    return _violate_in_range(
+        src, func_name,
+        r'((?:>|>=|<|<=)\s*)(\d+)',
+        lambda m: m.group(1) + "-9999",  # type: ignore[arg-type]
+    )
+
+
+def _violate_must_return(src: str, func_name: str) -> str:
+    return _violate_in_range(
+        src, func_name,
+        r'return (?!None\b)',
+        'return None  # QUELL_VIOLATION ',
+    )
