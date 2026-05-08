@@ -271,6 +271,22 @@ def _stub_param(p: ParamInfo) -> tuple[str, list[str], list[str]]:
     if ann_lower == "bool":
         return "True", [], []
 
+    # Callable types
+    if ann.startswith(("Callable", "typing.Callable")):
+        return "lambda: None", [], []
+
+    # Common stdlib types
+    if ann in ("logging.LogRecord",):
+        return "__import__('logging').LogRecord('test', 20, '', 0, 'msg', [], None)", [], []
+    if ann in ("datetime.datetime", "datetime"):
+        return "__import__('datetime').datetime(2024, 1, 1)", [], []
+    if ann in ("datetime.date",):
+        return "__import__('datetime').date(2024, 1, 1)", [], []
+    if ann in ("datetime.timedelta",):
+        return "__import__('datetime').timedelta(seconds=1)", [], []
+    if ann in ("re.Pattern", "re.Pattern[str]"):
+        return "__import__('re').compile('.*')", [], []
+
     # Guess from parameter name
     for key, stub in _NAME_STUBS:
         if key in name_lower:

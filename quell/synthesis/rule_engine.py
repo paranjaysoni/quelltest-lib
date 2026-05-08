@@ -117,7 +117,9 @@ class RuleEngine:
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
-        setup = self._setup_lines(fixtures)
+        # Intentionally skip _setup_lines — we want Path stubs to point to
+        # non-existent files so the function actually raises (FileNotFoundError etc.)
+        setup = ""
         name = self._name(req)
 
         code = f"""def {name}{fixture_str}:

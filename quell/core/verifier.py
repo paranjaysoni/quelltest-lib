@@ -209,17 +209,18 @@ def _violate_in_range(
     func_name: str,
     pattern: str,
     replacement: str,
+    count: int = 1,
 ) -> str:
     """Apply re.sub only within the lines of func_name."""
     rng = _func_line_range(src, func_name)
     if rng is None:
         # Fallback: file-wide replacement (original behaviour)
-        return re.sub(pattern, replacement, src, count=1)
+        return re.sub(pattern, replacement, src, count=count)
 
     lines = src.splitlines(keepends=True)
     start, end = rng[0] - 1, rng[1]  # convert to 0-indexed
     func_block = "".join(lines[start:end])
-    modified_block = re.sub(pattern, replacement, func_block, count=1)
+    modified_block = re.sub(pattern, replacement, func_block, count=count)
     return "".join(lines[:start]) + modified_block + "".join(lines[end:])
 
 
@@ -239,8 +240,10 @@ def _violate_boundary(src: str, func_name: str) -> str:
 
 
 def _violate_must_return(src: str, func_name: str) -> str:
+    # Replace ALL non-None returns so early-return paths are also violated.
     return _violate_in_range(
         src, func_name,
         r'return (?!None\b)',
         'return None  # QUELL_VIOLATION ',
+        count=0,
     )
