@@ -1,101 +1,267 @@
 # Quell — AI Handoff Context
 
-> Read this before touching any code. It covers what Quell is, how the
-> codebase is structured, every key design decision, and where the sharp
-> edges are. Written for AI tools and developers picking up mid-session.
+> Read this before touching any code. It covers what Quell is, the full
+> version history, current architecture, every module, key design decisions,
+> and where the sharp edges are. Written for AI tools and developers
+> picking up mid-session.
 
 ---
 
-## What Quell Is (One Sentence)
+## What Quell Is (Current — v0.5.0)
 
-**Quell is the verification layer for AI-generated tests — it proves every
-test actually catches real bugs, not just achieves coverage.**
+**Tagline:** "Your docstrings say what your code should do. Quell proves it."
 
-Every other tool (Qodo, Copilot, Cursor) generates tests that look green
-but are weak. Quell uses mutation testing as a proof engine: if a test
-doesn't kill a mutant, it doesn't count.
+Quell reads specifications that already exist in your codebase — docstrings,
+Pydantic models, PySpark schemas, bug reports — extracts every testable
+requirement, checks which ones have no test, generates a verified test for
+each gap, then writes it to disk. Every test is proven in two phases before
+it touches your files.
 
 ```
-Every other tool:   LLM → test → ✓ green (coverage achieved, but weak)
-Quell:              LLM → test → prove it kills a mutant → ✓ actually strong
+Old tools:  LLM → test → ✓ green (coverage achieved, requirement unknown)
+Quell:      spec → requirement → test → PASS original + FAIL violated → write
 ```
 
 ---
 
-## Repository Layout
+## Version History (from git)
+
+### v0.1.0 (commit f077cab)
+Initial release. Mutation-testing proof-of-concept.
+- `MutmutAdapter` — reads `.mutmut-cache` SQLite, auto-detects v2.x vs v3.x
+- `MutationAnalyzer` — classifies operator from AST diff
+- `TestGenerator` — rule-based for 9 operators, LLM fallback for UNKNOWN
+- `MutantVerifier` — apply mutant → run test → confirm kill → restore (finally)
+- `TestWriter` — libcst injection, backup + validate before write
+- Basic CLI: `quell scan`, `quell fix`, `quell auto`
+
+### v0.2.0 (commit 3556c86)
+CI, Score, Repair, MCP, and SDK.
+- `quell ci` — CI/CD threshold enforcement, `--diff-only` PR mode (2-3 min vs 15-30 min), JSON output
+- `quell score` — per-file score table, SVG badge generation, history tracking
+- `quell repair` — repair AI-generated test suites
+- `quell-mcp` — MCP server exposing 4 tools to AI agents (verify_test, get_survivors, generate_killing_test, get_quell_score)
+- `quell.sdk.Quell` — clean Python programmatic API
+- Files added: `quell/ci/`, `quell/score/`, `quell/repair/`, `quell/mcp_server.py`, `quell/sdk.py`
+
+### v0.3.0 (commit 8c5c8ad)
+GitHub integration and VS Code extension.
+- `quell github-comment` — post/update Quell score as idempotent PR comment
+- GitHub App webhook server (`quell/github/app.py`) for automatic PR comments
+- GitHub auth helper (`quell/github/auth.py`)
+- PR comment formatter (`quell/github/formatter.py`, `quell/github/pr_commenter.py`)
+- VS Code extension (`vscode-quell/`) — inline score annotations, status bar badge
+- Published to PyPI
+
+### v0.4.0 (commit a76b215) — ARCHITECTURAL PIVOT
+**Full pivot from mutation-testing to spec-first architecture.**
+Quell no longer requires mutmut. Instead it reads specifications.
+
+- **Pipeline rewritten**: spec readers → `list[Requirement]` → coverage checker → rule engine → verifier → writer
+- `quell/spec/docstring_reader.py` — extracts MUST_RAISE, BOUNDARY, ENUM_VALID, MUST_RETURN from docstrings
+- `quell/spec/type_reader.py` — extracts BOUNDARY and ENUM_VALID from Pydantic Field validators and Literal annotations
+- `quell/spec/bug_reader.py` — LLM-powered BUG_REPRO requirement generation from plain-English
+- `quell/spec/mutation_reader.py` — reads mutmut 3.x / Stryker results (optional bridge)
+- `quell/coverage/checker.py` — AST-based test coverage scan, no test execution required
+- `quell/synthesis/rule_engine.py` — deterministic test generation per ConstraintKind
+- `quell/synthesis/llm_engine.py` — LLM fallback for complex cases only
+- `Requirement` unified model: `target_file`, `target_function`, `description`, `constraint_kind`, `source`, `is_covered`
+- `ConstraintKind` enum: MUST_RAISE, BOUNDARY, ENUM_VALID, MUST_RETURN, BUG_REPRO
+- `SpecSource` enum: DOCSTRING, TYPE_ANNOTATION, BUG_REPORT, MUTATION
+- Score now measures requirement coverage (not mutation score)
+- Removed: `quell scan`, `quell fix`, `quell auto` (replaced by `quell check`)
+- Added: `quell check`, `quell reproduce`, `quell prove`
+- Tests: deleted mutation-testing tests, added spec reader + coverage checker + rule engine tests
+- `tests/fixtures/sample_project/` — reference project (payments.py) for integration tests
+
+### v0.4.1 (commit f0a9922)
+Privacy-safe diagnostic report and real callable test generation.
+- `quell/report/generator.py` — writes `.quell/report.json` after every `--fix` run. Records success/failure per requirement, unknown types, failure reasons. No source code, no full paths.
+- `quell/synthesis/sig_inspector.py` — AST-based signature inspection, builds real callable tests with correct argument types
+- Type stubs: str, int, float, bool, Path (→ tmp_path), Optional[X], List[X], Dict, name-based inference
+- `sdk._fix_gaps()` implemented — `quell check --fix` now actually runs rule engine, verifier, writer
+- File scanner excludes `.venv` and `site-packages`
+- `quell/core/verifier.py` — resolves pytest working directory by walking up to `pyproject.toml` / `setup.py`
+
+### v0.4.2 (commit 246b094)
+Targeted violation injection and optional-return detection.
+- Violation injector targets ONLY lines inside the named function using AST line ranges (prevents violating a different function with same pattern)
+- `must_return` skips generation when return annotation is `Optional[X]` or `X | None` (avoids false failures on cache-miss / empty inputs)
+
+### v0.4.3 (commit defd9a1)
+`quell --version` and version sync.
+- Added `--version` / `-V` flag to CLI
+- Synced `quell.__version__` with `pyproject.toml` (was stale at 0.1.0)
+
+### v0.4.4 (commit 2a5f1c5 + 1cf84e2)
+Rule engine improvements — 75% score on real-world projects.
+- `must_raise` tests use non-existent paths for Path parameters (triggers FileNotFoundError)
+- `sig_inspector.py` — added stubs for `Callable[..., T]`, `logging.LogRecord`, `datetime.datetime`, `datetime.date`, `re.Pattern`
+- Violation injector replaces ALL non-None `return` statements (not just the first) — fixes `doesnt_catch_violation` for early-return functions
+- `doesnt_catch_violation` count: 6 → 0 on reference project
+- `unknown_type_frequency` cleared — no more unknown stubs for common stdlib types
+- CI: lint, type check, and all tests green (90 pass, 1 skipped)
+
+### v0.5.0 (commit 13781cb) — CURRENT
+OAuth auth, PySpark reader, `quell pr`, `--no-llm`, GitHub Actions installer.
+
+**New modules:**
+- `quell/auth/__init__.py`, `quell/auth/oauth.py` — OAuth 2.0 PKCE browser login
+  - `login()` — local HTTP server port 7642, 120s timeout, browser auto-open
+  - `logout()` — revoke on server + delete `~/.quell/credentials.json`
+  - `load_credentials()` — reads file or `QUELL_API_KEY` env var
+  - `get_valid_token()` — refreshes if expired (60s buffer)
+  - `_save_credentials()` — chmod 600 (stat.S_IRUSR | stat.S_IWUSR)
+  - Single-session enforcement server-side (session_id in token)
+- `quell/github/pr_runner.py` — `GitHubPRRunner`
+  - Auto-detects repo from git remote (HTTPS + SSH)
+  - Fetches PR diff from GitHub API, writes changed files to temp dir
+  - Runs DocstringReader/TypeReader/PySparkReader on changed files
+  - Checks coverage against local project test files
+  - Posts/updates Quell report as PR comment (upserts existing)
+  - Score emoji: 🟢 ≥80% / 🟡 ≥50% / 🔴 <50%
+- `quell/spec/pyspark_reader.py` — `PySparkReader`
+  - Pure AST analysis — never imports pyspark at scan time
+  - Fast exit: if "StructType" not in source text, return []
+  - Parses `StructField(name, Type(), nullable=bool)` from assignments and return statements
+  - Generates NOT_NULL when nullable=False, TYPE_CHECK for all columns
+- `quell/synthesis/pyspark_rule_engine.py` — `PySparkRuleEngine`
+  - `_not_null()` → `pytest.raises((AnalysisException, Exception)): spark.createDataFrame([Row(col=None)])`
+  - `_type_check()` → `assertSchemaEqual` with expected StructType
+  - `ensure_conftest()` — auto-creates conftest.py with session-scoped SparkSession fixture
+
+**New ConstraintKinds:** `NOT_NULL`, `TYPE_CHECK`
+**New SpecSource:** `PYSPARK`
+**New QuellConfig field:** `enable_pyspark: bool = False`
+
+**New CLI commands:**
+- `quell pr <N>` — fetch PR diff, check coverage, post comment
+- `quell auth login` / `quell auth logout` / `quell auth status`
+- `quell install --hook` — writes pre-commit config to user's project
+- `quell install --pr` — writes `.github/workflows/quell-pr.yml`
+
+**New CLI flags on `quell check`:**
+- `--no-llm` — disables all LLM calls, rule-based only, prints "Your code never left your machine."
+- `--format json` — machine-readable output
+
+**Zero-config default:** `_load_config()` returns `llm_provider="none"` when no pyproject.toml
+
+**New test files:** `tests/unit/test_auth.py`, `tests/unit/test_pr_runner.py`, `tests/unit/test_pyspark_reader.py`
+
+**CI additions:**
+- `.github/workflows/ci.yml` — added `quell-self-check` job (runs quell on itself) + `release-check` job
+- `.github/workflows/quell-pr.yml` — posts Quell report on every PR touching `quell/**/*.py`
+
+**Optional extra:** `pip install quelltest[pyspark]` — only needed to run generated PySpark tests
+
+---
+
+## Current Repository Layout (v0.5.0)
 
 ```
 quell/
-├── cli.py                   ← all Typer CLI commands (scan, fix, auto, ci, score, repair, report, init)
-├── sdk.py                   ← clean programmatic API (Quell class)
-├── mcp_server.py            ← MCP server for AI agents (Claude Code, Cursor, Devin)
+├── __init__.py              ← __version__ = "0.5.0", public exports
+├── cli.py                   ← all Typer CLI commands
+├── sdk.py                   ← Quell class, CheckResult, programmatic API
+├── mcp_server.py            ← MCP server for AI agents
+├── auth/
+│   ├── __init__.py
+│   └── oauth.py             ← OAuth 2.0 PKCE, credentials, token refresh
 ├── core/
-│   ├── models.py            ← all Pydantic models — source of truth for data shapes
-│   ├── analyzer.py          ← classifies mutation operator from AST diff
-│   ├── generator.py         ← rule-based test generators + LLM fallback
-│   ├── verifier.py          ← THE MOAT: apply mutant → run test → confirm kill → restore
-│   └── writer.py            ← libcst-based test file injection (lossless)
-├── adapters/
-│   ├── base.py              ← MutationAdapter protocol
-│   ├── mutmut_adapter.py    ← mutmut 3.x (SQLite) + 2.x (CLI) auto-detect
-│   └── stryker_adapter.py   ← Stryker JSON report parser
+│   ├── models.py            ← ALL Pydantic models (source of truth)
+│   ├── verifier.py          ← THE MOAT: PASS original + FAIL violated (finally restores)
+│   └── writer.py            ← libcst injection, backup + validate before write
+├── coverage/
+│   └── checker.py           ← AST-based coverage scan, no test execution
+├── spec/
+│   ├── base.py              ← SpecReader protocol
+│   ├── docstring_reader.py  ← MUST_RAISE, BOUNDARY, ENUM_VALID, MUST_RETURN
+│   ├── type_reader.py       ← Pydantic Field validators, Literal annotations
+│   ├── bug_reader.py        ← LLM-powered BUG_REPRO from plain-English
+│   ├── mutation_reader.py   ← mutmut 3.x / Stryker bridge (optional)
+│   └── pyspark_reader.py    ← StructType → NOT_NULL + TYPE_CHECK (AST-only)
+├── synthesis/
+│   ├── rule_engine.py       ← deterministic test generation per ConstraintKind
+│   ├── llm_engine.py        ← LLM fallback for complex cases
+│   ├── sig_inspector.py     ← AST signature inspection → real callable tests
+│   └── pyspark_rule_engine.py ← NOT_NULL / TYPE_CHECK test generation
+├── github/
+│   ├── __init__.py          ← lazy __getattr__ imports (avoids circular import)
+│   ├── app.py               ← GitHub App webhook server
+│   ├── auth.py              ← GitHub App JWT auth
+│   ├── formatter.py         ← PR comment markdown formatter
+│   ├── pr_commenter.py      ← post/update PR comment
+│   └── pr_runner.py         ← GitHubPRRunner: fetch diff, run Quell, post comment
 ├── ci/
-│   ├── diff_parser.py       ← git diff → changed line ranges (for --diff-only)
-│   ├── runner.py            ← runs mutmut programmatically (full or targeted)
-│   ├── threshold.py         ← score threshold check + exit code logic
+│   ├── diff_parser.py       ← git diff → changed line ranges
+│   ├── runner.py            ← runs mutmut programmatically
+│   ├── threshold.py         ← score threshold + exit code
 │   └── reporter.py          ← console / JSON / GitHub Actions output
+├── report/
+│   └── generator.py         ← writes .quell/report.json (privacy-safe diagnostic)
 ├── score/
-│   ├── calculator.py        ← reads .mutmut-cache SQLite → ProjectScore / FileScore
-│   ├── badge.py             ← generates shields.io-style SVG badge
-│   └── tracker.py           ← appends score snapshots to .quell/history.json
+│   ├── calculator.py        ← FileScore / ProjectScore
+│   ├── badge.py             ← SVG badge generation
+│   └── tracker.py           ← .quell/history.json snapshots
 ├── repair/
-│   └── engine.py            ← RepairEngine: runs mutmut + fix loop internally
+│   └── engine.py            ← RepairEngine
 ├── llm/
-│   ├── client.py            ← LLMClient abstract base + factory
+│   ├── client.py            ← LLMClient abstract + factory
 │   ├── prompts.py           ← test generation prompt builder
 │   └── providers/
 │       ├── anthropic_provider.py
 │       ├── openai_provider.py
-│       └── ollama_provider.py   ← local/offline, no API key needed
+│       └── ollama_provider.py
+├── adapters/
+│   ├── base.py              ← MutationAdapter protocol
+│   ├── mutmut_adapter.py    ← mutmut 3.x (SQLite) + 2.x (CLI)
+│   └── stryker_adapter.py   ← Stryker JSON parser
 └── ui/
-    ├── console.py           ← Rich Console singleton
+    ├── console.py
     ├── progress.py
     └── diff.py
 ```
 
 ---
 
-## Data Flow (end to end)
+## The Pipeline (v0.5.0)
 
 ```
-mutmut run  →  .mutmut-cache (SQLite)
-                    ↓
-            MutmutAdapter.read_survivors()
-                    ↓
-            [SurvivedMutant, ...]          ← Pydantic models
-                    ↓
-            MutationAnalyzer.analyze()
-              • classifies operator
-              • finds enclosing function
-              • finds test file
-                    ↓
-            TestGenerator.generate()
-              • rule-based for 9 operators
-              • LLM fallback for UNKNOWN
-                    ↓
-            MutantVerifier.verify()        ← THE CRITICAL PATH
-              1. run pytest on original    → must PASS
-              2. apply mutant to disk
-              3. run pytest on mutated     → must FAIL
-              4. restore source (finally)
-                    ↓
-            TestWriter.write()
-              • backup source
-              • parse with libcst
-              • inject test function
-              • validate parse
-              • write to disk
-              • append to audit log
+INPUT READERS (spec/*)
+  docstring_reader.py   → Raises:/Returns: blocks in docstrings
+  type_reader.py        → Pydantic Field validators, Literal annotations
+  bug_reader.py         → plain-English bug descriptions (LLM)
+  pyspark_reader.py     → StructType schemas (AST-only, no pyspark import)
+  mutation_reader.py    → mutmut / Stryker results (optional)
+         │
+         ▼
+  list[Requirement]     ← unified model for everything
+         │
+         ▼
+COVERAGE CHECKER (coverage/checker.py)
+  AST-scans test files
+  marks each Requirement: covered / uncovered
+  uncertain → uncovered (prefer duplicate over missed gap)
+         │
+         ▼
+TEST SYNTHESIZER (synthesis/)
+  rule_engine.py        → fast deterministic rules per ConstraintKind
+  pyspark_rule_engine.py → NOT_NULL / TYPE_CHECK (PySpark-specific)
+  llm_engine.py         → LLM fallback for complex cases only
+         │
+         ▼
+VERIFICATION ENGINE (core/verifier.py)  ← THE MOAT
+  1. Run test on original code    → MUST PASS
+  2. Inject violation into source → breaks the requirement
+  3. Run test on violated code    → MUST FAIL
+  4. ALWAYS restore in finally    → no side effects
+  Only VERIFIED tests continue
+         │
+         ▼
+WRITER (core/writer.py)
+  libcst injection — never string concatenation
+  backup before write, validate CST, restore on failure
+  append audit log entry
 ```
 
 ---
@@ -104,159 +270,89 @@ mutmut run  →  .mutmut-cache (SQLite)
 
 | Model | Purpose |
 |-------|---------|
-| `SurvivedMutant` | A mutant your tests missed. Core unit of work. |
-| `GeneratedTest` | Candidate test function. Has `test_code`, `test_file_path`. |
-| `VerificationResult` | Outcome of running the test vs the mutant. |
-| `VerificationStatus` | `verified` / `fails_on_original` / `doesnt_kill_mutant` / `syntax_error` / `timeout` / `equivalent_mutant` |
-| `QuellConfig` | Loaded from `[tool.quell]` in pyproject.toml. Passed everywhere. |
-| `AuditEntry` | Immutable record written to `.quell/audit.jsonl` after every action. |
+| `Requirement` | One testable requirement. Has `constraint_kind`, `source`, `target_function`, `target_file`, `description`, `is_covered`, `violation_input` |
+| `ConstraintKind` | MUST_RAISE, BOUNDARY, ENUM_VALID, MUST_RETURN, BUG_REPRO, NOT_NULL, TYPE_CHECK |
+| `SpecSource` | DOCSTRING, TYPE_ANNOTATION, BUG_REPORT, MUTATION, PYSPARK |
+| `GeneratedTest` | Candidate test. Has `test_code`, `test_file_path`, `generated_by` |
+| `VerificationResult` | Outcome. Status: verified / fails_on_original / doesnt_catch_violation / syntax_error / timeout |
+| `QuellConfig` | Loaded from `[tool.quell]` in pyproject.toml. Defaults: `llm_provider="none"`, `enable_pyspark=False` |
+| `FileScore` / `ProjectScore` | Coverage metrics |
 
 ---
 
-## mutmut Adapter — Version Detection
-
-`MutmutAdapter` (`quell/adapters/mutmut_adapter.py`) auto-detects mutmut version:
-
-```python
-def _is_mutmut3(self) -> bool:
-    # mutmut 3.x uses MutantStatus table; 2.x uses mutant table
-    tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    return "MutantStatus" in {t[0] for t in tables}
-```
-
-- **v3.x path**: queries `MutantStatus WHERE status = 'survived'`, then calls
-  `mutmut show <id>` for each survivor to get the diff
-- **v2.x path**: calls `mutmut results` CLI + `mutmut show <id>` (original behaviour)
-- **no cache**: shows a Rich error panel and returns `[]`
-- **Windows**: mutmut 3.x requires WSL on Windows; adapter handles gracefully
-
----
-
-## CI Mode — `--diff-only` (the killer feature)
-
-Full mutation testing takes 15-30 min. `quell ci --diff-only` gets it to 2-3 min:
-
-1. `git diff --unified=0 origin/main...HEAD` → `ChangedLines` per file
-2. Pass modules to `mutmut run <module.path>` (targeted, not full project)
-3. Run fix loop on survivors only in changed files
-4. Check threshold, emit JSON/console/GitHub Actions output
-
-Implementation: `quell/ci/diff_parser.py` + `quell/ci/runner.py`
-
----
-
-## Score Module
-
-`quell/score/calculator.py` reads `.mutmut-cache` and produces:
-- `FileScore` — per-file: total/killed/survived mutants, score (0.0–1.0), grade (A/B/C/F)
-- `ProjectScore` — weighted aggregate across all files
-
-`quell/score/badge.py` generates shields.io-style SVG:
-- Green (`#4c1`) if ≥ 80%
-- Yellow (`#dfb317`) if 60–79%
-- Red (`#e05d44`) if < 60%
-
-`quell/score/tracker.py` appends JSON snapshots to `.quell/history.json` so
-`quell score --compare` can show deltas.
-
----
-
-## MCP Server (`quell/mcp_server.py`)
-
-Exposes 4 tools to AI coding agents:
-
-| Tool | What it does |
-|------|-------------|
-| `verify_test(test_code, source_file)` | Proves a test kills at least one mutant |
-| `get_survivors(source_file)` | Lists surviving mutants for a file |
-| `generate_killing_test(mutant_id, source_file)` | Generates + verifies a killing test |
-| `get_quell_score(file_path?)` | Returns current mutation score |
-
-Run: `uvx quell-mcp` (requires `pip install quell[mcp]`)
-
----
-
-## SDK (`quell/sdk.py`)
-
-```python
-from quell import Quell
-
-q = Quell()                            # reads pyproject.toml config
-q = Quell(llm="ollama", local=True)   # fully local
-
-result = q.verify_test("def test_foo(): ...", "src/utils.py")
-score  = q.get_score()
-fixes  = q.fix_all(auto_write=True)
-repair = q.repair(Path("tests/"), Path("src/"))
-```
-
----
-
-## CLI Commands
+## CLI Commands (v0.5.0)
 
 ```bash
-quell scan                         # list surviving mutants
-quell fix                          # interactive fix loop
-quell auto                         # batch auto-fix (no prompts)
-quell ci                           # CI/CD pipeline
-quell ci --diff-only               # PR mode: only changed lines
-quell ci --threshold 0.80          # fail if score < 80%
-quell ci --report json             # JSON output for dashboards
-quell score                        # per-file score table
-quell score --badge                # write .quell/badge.svg
-quell score --format json
-quell repair tests/                # repair AI-generated test suites
-quell repair tests/ --show-only
-quell report                       # audit log
-quell init                         # add [tool.quell] to pyproject.toml
-quell-mcp                          # start MCP server
+quell check <path>                   # scan specs, show gaps
+quell check <path> --fix             # generate + verify + write tests
+quell check <path> --no-llm          # rule-based only, no network
+quell check <path> --format json     # machine-readable output
+
+quell pr <N>                         # check PR #N diff, show gaps
+quell pr <N> --comment               # post result as PR comment
+quell pr <N> --repo owner/repo       # explicit repo (auto-detects from git remote)
+
+quell auth login                     # OAuth PKCE browser login
+quell auth logout                    # revoke token + delete credentials
+quell auth status                    # show current session info
+
+quell install --hook                 # write pre-commit config
+quell install --pr                   # write .github/workflows/quell-pr.yml
+
+quell reproduce "bug description"    # LLM-powered BUG_REPRO test
+quell prove <file>                   # show requirement coverage for file
+
+quell score                          # per-file score table
+quell score --badge                  # write .quell/badge.svg
+quell ci src/ --threshold 0.75       # CI threshold gate
+quell --version                      # show version
 ```
 
 ---
 
-## Configuration (`[tool.quell]` in pyproject.toml)
+## Key Invariants — NEVER Violate
+
+1. `verifier.py`: ALWAYS restore source files in a `finally` block
+2. `writer.py`: ALWAYS backup before writing, ALWAYS restore on failure
+3. `writer.py`: ALWAYS validate CST parses correctly before writing to disk
+4. NO code transmitted to any server except the configured LLM provider
+5. LLM called ONLY when rule engine is insufficient
+6. Every spec reader returns `[]` on any error — never raises
+7. pytest always in subprocess — never in-process (module cache)
+8. Coverage checker marks uncertain as uncovered (prefer duplicate over missed gap)
+9. `quell/github/__init__.py` uses lazy `__getattr__` — NOT eager imports (avoids circular import via `quell.ci.runner`)
+
+---
+
+## Configuration
 
 ```toml
 [tool.quell]
-llm_provider = "anthropic"           # "anthropic" | "openai" | "ollama"
+llm_provider = "none"              # "none" | "anthropic" | "openai" | "ollama"
 llm_model = "claude-sonnet-4-6"
 max_verification_attempts = 3
 verification_timeout_seconds = 30
 auto_write = false
+enable_docstring = true
+enable_types = true
+enable_pyspark = false             # requires pip install quelltest[pyspark] to run generated tests
+enable_mutations = false
+score_threshold = 0.0
 ```
 
-LLM env vars (only needed for UNKNOWN operators):
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
-# or run Ollama locally — no API key needed
-```
+Zero-config: if no `pyproject.toml`, `_load_config()` returns `QuellConfig(llm_provider="none")`.
+
+Auth: `QUELL_API_KEY` env var bypasses browser login (for CI).
 
 ---
 
-## Adding a New Mutation Operator
+## Known Sharp Edges
 
-1. Add enum value to `MutationOperator` in `quell/core/models.py`
-2. Add classification logic to `_classify_operator` in `quell/core/analyzer.py`
-3. Add generator method `_generate_<operator>_test` in `quell/core/generator.py`
-4. Add route in `generate()` in `quell/core/generator.py`
-5. Add tests in `tests/unit/test_generator.py`
-
-## Adding a New Mutation Adapter (e.g. PIT for Java)
-
-1. Create `quell/adapters/pit_adapter.py` implementing `MutationAdapter` protocol
-2. Add it to `_get_adapter()` in `quell/cli.py`
-3. Add integration tests in `tests/adapters/test_pit_adapter.py`
-
----
-
-## Non-Goals (do not build)
-
-- Do NOT generate tests from scratch for uncovered code (that's Copilot's job)
-- Do NOT implement LSP — use MCP for editor integration
-- Do NOT work on compiled languages in v1 (Python first, JS/TS second)
-- Do NOT replace mutmut/Stryker — Quell is downstream, not a replacement
-- Do NOT add `--skip-verification` — verification is the moat
+- `chmod 600` on credentials is a no-op on Windows (test skipped with `@pytest.mark.skipif(sys.platform == "win32", ...)`)
+- PySpark tests require a real SparkSession — conftest.py is auto-created but tests only run if `pyspark` is installed
+- `quell/github/__init__.py` MUST use lazy imports — eager imports cause `ImportError: cannot import name 'run_mutmut_full'` via the ci module chain
+- Violation injector replaces ALL non-None `return` statements in target function scope — required for early-return paths
+- `must_return` skips generation for `Optional[X]` / `X | None` return types (avoids false failures)
 
 ---
 
@@ -264,8 +360,13 @@ export OPENAI_API_KEY=sk-...
 
 ```bash
 uv sync --dev
-uv run pytest tests/ -v           # 105 tests
+uv run pytest tests/ -v            # 90 pass, 1 skipped
 uv run ruff check . --fix
 uv run mypy quell/
 uv run quell --help
+uv build                           # dist/quelltest-0.5.0-py3-none-any.whl
 ```
+
+PyPI: `pip install quelltest` → 0.5.0
+PyPI (PySpark extra): `pip install quelltest[pyspark]`
+GitHub: https://github.com/shashank7109/quelltest_lib
