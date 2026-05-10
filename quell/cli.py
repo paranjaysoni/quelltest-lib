@@ -16,8 +16,8 @@ Commands:
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json as _json
+import threading
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
@@ -185,15 +185,24 @@ def _method_tag(source_value: str, generated_by: str = "") -> str:
 
 
 def _run_async(coro: Coroutine[Any, Any, None]) -> None:
-    """Run a coroutine safely whether or not an event loop is already running."""
-    try:
-        asyncio.get_running_loop()
-        # Already inside a running loop (Jupyter, IPython, nested async env).
-        # Spin up a thread with its own loop so asyncio.run() works cleanly.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(asyncio.run, coro).result()
-    except RuntimeError:
-        asyncio.run(coro)
+    """Run a coroutine in a dedicated thread with its own event loop.
+
+    Always uses a new thread so asyncio.run() never conflicts with any
+    outer event loop (Jupyter, IPython, Refactron, etc.).
+    """
+    exc: list[BaseException] = []
+
+    def _target() -> None:
+        try:
+            asyncio.run(coro)
+        except BaseException as e:  # noqa: BLE001
+            exc.append(e)
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join()
+    if exc:
+        raise exc[0]
 
 
 @app.command("scan")
