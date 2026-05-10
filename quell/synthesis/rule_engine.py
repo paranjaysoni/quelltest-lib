@@ -33,6 +33,10 @@ class RuleEngine:
             ConstraintKind.ENUM_VALID,
             ConstraintKind.MUST_RETURN,
             ConstraintKind.BUG_REPRO,
+            # code_guard kinds
+            ConstraintKind.NOT_NULL,
+            ConstraintKind.TYPE_CHECK,
+            ConstraintKind.SILENT_FAIL,
         }
 
     def generate(self, req: Requirement) -> GeneratedTest | None:
@@ -46,6 +50,12 @@ class RuleEngine:
             return self._must_return(req)
         if req.constraint_kind == ConstraintKind.BUG_REPRO:
             return self._bug_repro(req)
+        if req.constraint_kind == ConstraintKind.NOT_NULL:
+            return self._not_null(req)
+        if req.constraint_kind == ConstraintKind.TYPE_CHECK:
+            return self._type_check(req)
+        if req.constraint_kind == ConstraintKind.SILENT_FAIL:
+            return self._silent_fail(req)
         return None
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -223,6 +233,114 @@ class RuleEngine:
             test_code=code,
             test_file_path=self._test_file(req),
             explanation=f"Return not-None: {req.description}",
+            generated_by="rule_engine",
+            unknown_types=unknown,
+        )
+
+    def _not_null(self, req: Requirement) -> GeneratedTest:
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
+        name = self._name(req)
+
+        # Use violation_input to identify which param to set None
+        null_param: str | None = None
+        if req.violation_input:
+            for k, v in req.violation_input.items():
+                if v is None:
+                    null_param = k
+                    break
+
+        if null_param:
+            null_call = re.sub(
+                rf"\b{re.escape(null_param)}\s*=\s*[^,)]+",
+                f"{null_param}=None",
+                call,
+                count=1,
+            )
+            if null_call == call:
+                null_call = call.rstrip(")") + f", {null_param}=None)"
+        else:
+            # Replace first string or numeric stub with None
+            null_call = re.sub(r'="test_value"', "=None", call, count=1)
+            if null_call == call:
+                null_call = re.sub(r"=\d+", "=None", call, count=1)
+            if null_call == call:
+                null_call = call.rstrip(")") + ", value=None)"
+
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
+    import pytest
+    {imp}
+{setup}    with pytest.raises(Exception):
+        {null_call}
+"""
+        return GeneratedTest(
+            requirement_id=req.id,
+            test_function_name=name,
+            test_code=code,
+            test_file_path=self._test_file(req),
+            explanation=f"Not-null violation: {req.description}",
+            generated_by="rule_engine",
+            unknown_types=unknown,
+        )
+
+    def _type_check(self, req: Requirement) -> GeneratedTest:
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
+        name = self._name(req)
+
+        # Pass a string where a numeric type is expected
+        type_call = re.sub(r"=\d+", '="invalid_type"', call, count=1)
+        if type_call == call:
+            type_call = call.rstrip(")") + ', value="invalid_type")'
+
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
+    import pytest
+    {imp}
+{setup}    with pytest.raises((TypeError, Exception)):
+        {type_call}
+"""
+        return GeneratedTest(
+            requirement_id=req.id,
+            test_function_name=name,
+            test_code=code,
+            test_file_path=self._test_file(req),
+            explanation=f"Type check violation: {req.description}",
+            generated_by="rule_engine",
+            unknown_types=unknown,
+        )
+
+    def _silent_fail(self, req: Requirement) -> GeneratedTest:
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
+        name = self._name(req)
+
+        # Replace first string/numeric stub with None or falsy value
+        falsy_call = re.sub(r'="test_value"', "=None", call, count=1)
+        if falsy_call == call:
+            falsy_call = re.sub(r"=\d+", "=0", call, count=1)
+        if falsy_call == call:
+            falsy_call = call.rstrip(")") + ", value=None)"
+
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
+    import pytest
+    {imp}
+{setup}    # This function returns None silently instead of raising.
+    # The test proves the gap: it should raise but currently doesn't.
+    with pytest.raises(Exception):
+        {falsy_call}
+"""
+        return GeneratedTest(
+            requirement_id=req.id,
+            test_function_name=name,
+            test_code=code,
+            test_file_path=self._test_file(req),
+            explanation=f"Silent failure — should raise: {req.description}",
             generated_by="rule_engine",
             unknown_types=unknown,
         )

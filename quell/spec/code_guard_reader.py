@@ -147,8 +147,8 @@ class CodeGuardReader:
                 violation_input=self._extract_null_input(test),
             )
 
-        # Pattern 1: if x <= 0 or if x < 0 etc. (boundary)
-        if self._is_boundary_check(test):
+        # Pattern 1: if x <= 0 or if x < 0 etc. (boundary, including compound)
+        if self._is_boundary_check(test) or self._is_compound_boundary(test):
             return Requirement(
                 id=str(uuid.uuid4())[:8],
                 description=f"boundary condition — {raw}",
@@ -310,9 +310,14 @@ class CodeGuardReader:
 
     def _is_boundary_check(self, test: ast.expr) -> bool:
         if isinstance(test, ast.Compare):
-            for op in test.ops:
+            for i, op in enumerate(test.ops):
                 if isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
                     return True
+                # Numeric equality: if x == 0 / if x != 0
+                if isinstance(op, (ast.Eq, ast.NotEq)):
+                    comparator = test.comparators[i] if i < len(test.comparators) else None
+                    if isinstance(comparator, ast.Constant) and isinstance(comparator.value, (int, float)):
+                        return True
         return False
 
     def _is_enum_check(self, test: ast.expr) -> bool:
@@ -345,6 +350,15 @@ class CodeGuardReader:
         ]
         raw_lower = raw.lower()
         return any(kw in raw_lower for kw in auth_keywords)
+
+    def _is_compound_boundary(self, test: ast.expr) -> bool:
+        """Detect `if x < 0 or x > 100:` — BoolOp wrapping boundary comparisons."""
+        if isinstance(test, ast.BoolOp):
+            return any(self._is_boundary_check(v) for v in test.values)
+        # `not (0 <= x <= 100)` — UnaryOp wrapping a chained Compare
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            return self._is_boundary_check(test.operand)
+        return False
 
     def _is_magic_value_check(self, test: ast.expr) -> bool:
         """Detect hardcoded string/int literal in a comparison condition."""
