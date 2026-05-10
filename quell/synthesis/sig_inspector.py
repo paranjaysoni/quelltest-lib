@@ -24,6 +24,7 @@ class FuncSignature:
     params: list[ParamInfo]
     return_annotation: str | None
     class_name: str | None = None  # set when function is a class method
+    is_async: bool = False  # True for async def functions
 
     @property
     def is_method(self) -> bool:
@@ -220,6 +221,7 @@ def _extract(
         params=params,
         return_annotation=_ann_str(node.returns),
         class_name=class_name,
+        is_async=isinstance(node, ast.AsyncFunctionDef),
     )
 
 

@@ -365,10 +365,20 @@ def cmd_scan(
             candidate = rule_engine.generate(req)
             generated_by_tag = "[dim][rule-based, no network][/dim]"
             if candidate is None:
-                item["outcome"] = "skipped_local_var"
-                if "self." in (req.raw_spec_text or ""):
+                # Determine reason: async, self.attr, or local variable
+                from quell.synthesis import sig_inspector as _si
+                _sig = _si.inspect(req.target_function, req.target_file)
+                if _sig and _sig.is_async:
+                    item["outcome"] = "skipped_async"
+                    item["reason"] = (
+                        "async def function — sync stub calls return a coroutine, "
+                        "not an exception. Test via pytest-asyncio + real fixtures."
+                    )
+                elif "self." in (req.raw_spec_text or ""):
+                    item["outcome"] = "skipped_local_var"
                     item["reason"] = "guard checks self.attr — needs class instantiation"
                 else:
+                    item["outcome"] = "skipped_local_var"
                     item["reason"] = (
                         "guard variable is a local variable (DB result, computed value) "
                         "not a function parameter — can't inject via stub"
@@ -495,6 +505,7 @@ def _write_scan_report(
         "rejected_fails_on_correct": outcomes.count("rejected_fails_on_correct"),
         "rejected_no_catch": outcomes.count("rejected_no_catch"),
         "skipped_no_rule": outcomes.count("skipped_no_rule"),
+        "skipped_async": outcomes.count("skipped_async"),
         "skipped_local_var": outcomes.count("skipped_local_var"),
         "skipped_no_gen": outcomes.count("skipped_no_gen"),
     }
@@ -511,7 +522,8 @@ def _write_scan_report(
     console.print(f"\n[dim]Report written → {report_path}[/dim]")
     console.print(
         f"  verified={summary['verified_and_written']}  "
-        f"rejected_stub_mismatch={summary['rejected_fails_on_correct']}  "
+        f"rejected={summary['rejected_fails_on_correct']}  "
+        f"skipped_async={summary['skipped_async']}  "
         f"skipped_local_var={summary['skipped_local_var']}  "
         f"skipped_no_rule={summary['skipped_no_rule']}"
     )
