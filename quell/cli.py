@@ -184,17 +184,18 @@ def _method_tag(source_value: str, generated_by: str = "") -> str:
     return "[dim][rule-based, no network][/dim]"
 
 
-def _run_async(coro: Coroutine[Any, Any, None]) -> None:
-    """Run a coroutine in a dedicated thread with its own event loop.
+def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run a coroutine in a fresh thread with its own event loop.
 
-    Always uses a new thread so asyncio.run() never conflicts with any
-    outer event loop (Jupyter, IPython, Refactron, etc.).
+    Wraps a single async call so the rest of cmd_scan stays synchronous.
+    Each call gets an isolated thread — immune to any outer event loop.
     """
+    result: list[Any] = [None]
     exc: list[BaseException] = []
 
     def _target() -> None:
         try:
-            asyncio.run(coro)
+            result[0] = asyncio.run(coro)
         except BaseException as e:  # noqa: BLE001
             exc.append(e)
 
@@ -203,6 +204,7 @@ def _run_async(coro: Coroutine[Any, Any, None]) -> None:
     t.join()
     if exc:
         raise exc[0]
+    return result[0]
 
 
 @app.command("scan")
@@ -224,16 +226,8 @@ def cmd_scan(
     quell scan src/ --fix --suggest   find gaps + tests + suggest fixes
     quell scan src/ --no-llm          rule-based only, zero network
     """
-    _run_async(_scan_async(target, fix, suggest, no_llm, project_root))
-
-
-async def _scan_async(
-    target: Path,
-    fix: bool,
-    suggest: bool,
-    no_llm: bool,
-    project_root: Path,
-) -> None:
+    # Fully synchronous — no asyncio.run() at the top level.
+    # LLM calls inside use _run_coro() which isolates each await in its own thread.
     from quell.core.models import VerificationStatus
     from quell.coverage.checker import CoverageChecker
     from quell.spec.code_guard_reader import CodeGuardReader
@@ -328,7 +322,6 @@ async def _scan_async(
     verifier = Verifier(config, project_root=project_root)
     writer = Writer(config)
     fixed = 0
-    llm_used = False
 
     for i, req in enumerate(gaps, 1):
         console.print(
@@ -341,11 +334,14 @@ async def _scan_async(
             candidate = rule_engine.generate(req)
             generated_by_tag = "[dim][rule-based, no network][/dim]"
         elif synthesizer:
-            candidate = await synthesizer.synthesize(req)
+            # LLM call — run in isolated thread to avoid event loop conflicts
+            candidate = _run_coro(synthesizer.synthesize(req))
             generated_by_tag = "[dim][llm][/dim]"
-            llm_used = True
         else:
-            console.print("  [dim]Skipped (needs LLM, remove --no-llm)[/dim]")
+            console.print(
+                "  [dim]Skipped — rule engine can't handle this guard type. "
+                "Use without --no-llm for LLM fallback.[/dim]"
+            )
             continue
 
         if not candidate:
@@ -363,9 +359,9 @@ async def _scan_async(
 
             if suggest and llm and not no_llm:
                 from quell.fix.suggester import FixSuggester
-                suggester = FixSuggester(llm, config)
+                suggester_obj = FixSuggester(llm, config)
                 with console.status("Generating fix suggestion..."):
-                    fix_suggestion = await suggester.suggest(req, candidate)
+                    fix_suggestion = _run_coro(suggester_obj.suggest(req, candidate))
 
                 if fix_suggestion and fix_suggestion.verified:
                     console.print(
@@ -404,17 +400,10 @@ async def _scan_async(
                 "  [yellow]Test generated but doesn't catch the gap — needs manual review[/yellow]"
             )
         elif result.status == VerificationStatus.FAILS_ON_CORRECT:
-            console.print("  [red]Generated test breaks correct code — rejected[/red]")
-
-    privacy_line = (
-        "[dim]Your code never left your machine.[/dim]"
-        if not llm_used else
-        "[dim]LLM used for complex cases — only function signatures sent.[/dim]"
-    )
-    console.print(Panel.fit(
-        f"[bold]Done![/bold] {fixed}/{len(gaps)} gaps have failing tests written\n"
-        + privacy_line
-    ))
+            console.print(
+                "  [red]Test breaks valid code — rejected "
+                "(function uses complex arg types; try without --no-llm)[/red]"
+            )
 
 
 @app.command("check")
