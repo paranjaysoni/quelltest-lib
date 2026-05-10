@@ -25,6 +25,7 @@ class FuncSignature:
     return_annotation: str | None
     class_name: str | None = None  # set when function is a class method
     is_async: bool = False  # True for async def functions
+    is_classmethod: bool = False  # True for @classmethod / @validator / @field_validator
 
     @property
     def is_method(self) -> bool:
@@ -199,6 +200,26 @@ def stub_for_call(sig: FuncSignature) -> tuple[str, list[str], list[str]]:
 
 # ── internals ────────────────────────────────────────────────────────────────
 
+_CLASSMETHOD_DECORATORS = frozenset(
+    ("classmethod", "validator", "field_validator", "model_validator", "staticmethod")
+)
+
+
+def _is_classmethod_node(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for d in node.decorator_list:
+        if isinstance(d, ast.Name) and d.id in _CLASSMETHOD_DECORATORS:
+            return True
+        if isinstance(d, ast.Call):
+            func = d.func
+            name = (
+                func.id if isinstance(func, ast.Name) else
+                func.attr if isinstance(func, ast.Attribute) else ""
+            )
+            if name in _CLASSMETHOD_DECORATORS:
+                return True
+    return False
+
+
 def _extract(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     class_name: str | None,
@@ -216,12 +237,14 @@ def _extract(
             has_default=has_default,
         ))
 
+    is_classmethod = _is_classmethod_node(node)
     return FuncSignature(
         name=node.name,
         params=params,
         return_annotation=_ann_str(node.returns),
         class_name=class_name,
         is_async=isinstance(node, ast.AsyncFunctionDef),
+        is_classmethod=is_classmethod,
     )
 
 
@@ -297,6 +320,6 @@ def _stub_param(p: ParamInfo) -> tuple[str, list[str], list[str]]:
             unknown_list = [ann] if ann else []
             return stub, fixtures, unknown_list
 
-    # Truly unknown custom type
+    # Truly unknown custom type — use None, track in unknown_list for report
     unknown_list = [ann] if ann else []
-    return "None  # unknown: provide a valid instance", [], unknown_list
+    return "None", [], unknown_list

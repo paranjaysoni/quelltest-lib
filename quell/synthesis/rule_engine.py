@@ -91,16 +91,21 @@ class RuleEngine:
         call_args, fixtures, unknown = sig_inspector.stub_for_call(sig)
 
         if sig.is_method and sig.class_name:
-            # Inspect __init__ to build instantiation
-            init_sig = sig_inspector.inspect_init(sig.class_name, req.target_file)
-            if init_sig is not None and init_sig.required_params:
-                init_args, init_fix, init_unk = sig_inspector.stub_for_call(init_sig)
-                fixtures.extend(init_fix)
-                unknown.extend(init_unk)
-                inst = f"{sig.class_name}({init_args})"
+            if sig.is_classmethod:
+                # Classmethods (including Pydantic @validator): call on the class directly,
+                # Python auto-passes cls — no construction needed, no Pydantic validation.
+                call = f"{sig.class_name}.{func}({call_args})"
             else:
-                inst = f"{sig.class_name}()"
-            call = f"{inst}.{func}({call_args})"
+                # Inspect __init__ to build instantiation
+                init_sig = sig_inspector.inspect_init(sig.class_name, req.target_file)
+                if init_sig is not None and init_sig.required_params:
+                    init_args, init_fix, init_unk = sig_inspector.stub_for_call(init_sig)
+                    fixtures.extend(init_fix)
+                    unknown.extend(init_unk)
+                    inst = f"{sig.class_name}({init_args})"
+                else:
+                    inst = f"{sig.class_name}()"
+                call = f"{inst}.{func}({call_args})"
         else:
             call = f"{func}({call_args})"
 
@@ -199,8 +204,10 @@ class RuleEngine:
         # Replace the first string arg with an invalid enum value
         enum_call = re.sub(r'"test_value"', '"INVALID_VALUE"', call, count=1)
         if enum_call == call:
-            # No string stub to replace — append an invalid kwarg
-            enum_call = _append_kwarg(call, 'currency="INVALID_VALUE"')
+            # No string stub to replace — append an invalid kwarg using the actual variable name
+            vi = req.violation_input or {}
+            enum_var = str(vi.get("variable", "value"))
+            enum_call = _append_kwarg(call, f'{enum_var}="INVALID_VALUE"')
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
@@ -289,7 +296,7 @@ class RuleEngine:
             null_call = re.sub(r'="test_value"', "=None", call, count=1)
             if null_call == call:
                 null_call = re.sub(r"=\d+", "=None", call, count=1)
-            if null_call == call:
+            if null_call == call and "=None" not in call:
                 null_call = _append_kwarg(call, "value=None")
 
         code = f"""def {name}{fixture_str}:
@@ -353,7 +360,8 @@ class RuleEngine:
         falsy_call = re.sub(r'="test_value"', "=None", call, count=1)
         if falsy_call == call:
             falsy_call = re.sub(r"=\d+", "=0", call, count=1)
-        if falsy_call == call:
+        if falsy_call == call and "=None" not in call:
+            # Only append if there's no existing None stub (Optional params already set =None)
             falsy_call = _append_kwarg(call, "value=None")
 
         code = f"""def {name}{fixture_str}:
