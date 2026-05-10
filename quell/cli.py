@@ -16,8 +16,11 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json as _json
+from collections.abc import Coroutine
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -181,6 +184,18 @@ def _method_tag(source_value: str, generated_by: str = "") -> str:
     return "[dim][rule-based, no network][/dim]"
 
 
+def _run_async(coro: Coroutine[Any, Any, None]) -> None:
+    """Run a coroutine safely whether or not an event loop is already running."""
+    try:
+        asyncio.get_running_loop()
+        # Already inside a running loop (Jupyter, IPython, nested async env).
+        # Spin up a thread with its own loop so asyncio.run() works cleanly.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        asyncio.run(coro)
+
+
 @app.command("scan")
 def cmd_scan(
     target: Path = typer.Argument(Path("."), help="File or directory to scan"),
@@ -200,7 +215,7 @@ def cmd_scan(
     quell scan src/ --fix --suggest   find gaps + tests + suggest fixes
     quell scan src/ --no-llm          rule-based only, zero network
     """
-    asyncio.run(_scan_async(target, fix, suggest, no_llm, project_root))
+    _run_async(_scan_async(target, fix, suggest, no_llm, project_root))
 
 
 async def _scan_async(
