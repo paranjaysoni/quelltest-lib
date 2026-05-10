@@ -342,7 +342,7 @@ def cmd_scan(
     fixed = 0
 
     # Report tracking — written to quell-report.json at the end
-    report_items: list[dict] = []
+    report_items: list[dict[str, Any]] = []
 
     for i, req in enumerate(gaps, 1):
         console.print(
@@ -351,7 +351,7 @@ def cmd_scan(
         )
         console.print(f"  Guard: [dim]{req.raw_spec_text}[/dim]")
 
-        item: dict = {
+        item: dict[str, Any] = {
             "function": req.target_function,
             "file": str(req.target_file),
             "guard": req.raw_spec_text or req.description,
@@ -402,7 +402,7 @@ def cmd_scan(
             )
             console.print(Syntax(candidate.test_code, "python", theme="monokai"))
 
-            if suggest and use_llm:
+            if suggest and use_llm and llm_client is not None:
                 from quell.fix.suggester import FixSuggester
                 suggester_obj = FixSuggester(llm_client, config)
                 with console.status("Generating fix suggestion..."):
@@ -470,9 +470,9 @@ def cmd_scan(
 def _write_scan_report(
     project_root: Path,
     target: str,
-    all_requirements: list,
-    gaps: list,
-    items: list[dict],
+    all_requirements: list[Any],
+    gaps: list[Any],
+    items: list[dict[str, Any]],
     written: int,
 ) -> None:
     """Write quell-report.json to project_root. Always called at end of scan."""

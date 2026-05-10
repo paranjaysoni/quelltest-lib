@@ -191,7 +191,7 @@ class RuleEngine:
         enum_call = re.sub(r'"test_value"', '"INVALID_VALUE"', call, count=1)
         if enum_call == call:
             # No string stub to replace — append an invalid kwarg
-            enum_call = call.rstrip(")") + ', currency="INVALID_VALUE")'
+            enum_call = _append_kwarg(call, 'currency="INVALID_VALUE"')
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
@@ -258,6 +258,11 @@ class RuleEngine:
                     null_param = k
                     break
 
+        # If the null variable is not in the function signature, it's a local variable.
+        # Injecting it as a kwarg produces a TypeError — skip instead.
+        if null_param and null_param not in call:
+            return None
+
         if null_param:
             null_call = re.sub(
                 rf"\b{re.escape(null_param)}\s*=\s*[^,)]+",
@@ -266,14 +271,14 @@ class RuleEngine:
                 count=1,
             )
             if null_call == call:
-                null_call = call.rstrip(")") + f", {null_param}=None)"
+                null_call = _append_kwarg(call, f"{null_param}=None")
         else:
             # Replace first string or numeric stub with None
             null_call = re.sub(r'="test_value"', "=None", call, count=1)
             if null_call == call:
                 null_call = re.sub(r"=\d+", "=None", call, count=1)
             if null_call == call:
-                null_call = call.rstrip(")") + ", value=None)"
+                null_call = _append_kwarg(call, "value=None")
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
@@ -301,7 +306,7 @@ class RuleEngine:
         # Pass a string where a numeric type is expected
         type_call = re.sub(r"=\d+", '="invalid_type"', call, count=1)
         if type_call == call:
-            type_call = call.rstrip(")") + ', value="invalid_type")'
+            type_call = _append_kwarg(call, 'value="invalid_type"')
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
@@ -335,7 +340,7 @@ class RuleEngine:
         if falsy_call == call:
             falsy_call = re.sub(r"=\d+", "=0", call, count=1)
         if falsy_call == call:
-            falsy_call = call.rstrip(")") + ", value=None)"
+            falsy_call = _append_kwarg(call, "value=None")
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
@@ -430,8 +435,15 @@ def _inject_short_string(call: str, variable: str) -> str:
     # Fallback: replace first string stub with a short string
     modified = re.sub(r'"test_value"', '"ab"', call, count=1)
     if modified == call:
-        modified = call.rstrip(")") + ', value="ab")'
+        modified = _append_kwarg(call, 'value="ab"')
     return modified
+
+
+def _append_kwarg(call: str, kwarg: str) -> str:
+    """Append a kwarg to a call string without producing `func(, kwarg=val)`."""
+    base = call.rstrip(")")
+    sep = "" if base.endswith("(") else ", "
+    return f"{base}{sep}{kwarg})"
 
 
 def _inject_boundary_value(call: str, description: str) -> str:
@@ -452,6 +464,5 @@ def _inject_boundary_value(call: str, description: str) -> str:
     # Replace first integer stub (=1 or =0) with boundary value
     modified = re.sub(r"=\b\d+\b", f"={boundary_val}", call, count=1)
     if modified == call:
-        # No integer found — append the boundary param
-        modified = call.rstrip(")") + f", value={boundary_val})"
+        modified = _append_kwarg(call, f"value={boundary_val}")
     return modified

@@ -310,13 +310,17 @@ class CodeGuardReader:
 
     def _is_boundary_check(self, test: ast.expr) -> bool:
         if isinstance(test, ast.Compare):
+            # Skip attribute access (result.count == 0) — left side is a local var, not a param
+            if isinstance(test.left, ast.Attribute):
+                return False
             for i, op in enumerate(test.ops):
                 if isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
                     return True
-                # Numeric equality: if x == 0 / if x != 0
+                # Numeric equality: if x == 0 / if x != 0 (only for plain Name or len())
                 if isinstance(op, (ast.Eq, ast.NotEq)):
+                    left_ok = isinstance(test.left, (ast.Name, ast.Call))
                     comparator = test.comparators[i] if i < len(test.comparators) else None
-                    if isinstance(comparator, ast.Constant) and isinstance(comparator.value, (int, float)):
+                    if left_ok and isinstance(comparator, ast.Constant) and isinstance(comparator.value, (int, float)):
                         return True
         return False
 
