@@ -365,16 +365,9 @@ def cmd_scan(
             candidate = rule_engine.generate(req)
             generated_by_tag = "[dim][rule-based, no network][/dim]"
             if candidate is None:
-                # Determine reason: async, self.attr, or local variable
-                from quell.synthesis import sig_inspector as _si
-                _sig = _si.inspect(req.target_function, req.target_file)
-                if _sig and _sig.is_async:
-                    item["outcome"] = "skipped_async"
-                    item["reason"] = (
-                        "async def function — sync stub calls return a coroutine, "
-                        "not an exception. Test via pytest-asyncio + real fixtures."
-                    )
-                elif "self." in (req.raw_spec_text or ""):
+                # Async is now handled via asyncio.run wrap; only structural
+                # reasons cause a None return: self.attr or local variable.
+                if "self." in (req.raw_spec_text or ""):
                     item["outcome"] = "skipped_local_var"
                     item["reason"] = "guard checks self.attr — needs class instantiation"
                 else:

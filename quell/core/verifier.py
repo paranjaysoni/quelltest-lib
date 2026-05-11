@@ -113,7 +113,13 @@ class Verifier:
         d = self.backup_dir / "temp"
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"quell_{test.requirement_id}.py"
-        f.write_text(test.test_code)
+        # CRITICAL: utf-8 explicitly. On Windows, Path.write_text() defaults to
+        # cp1252; Python source is utf-8 (PEP 3120). Em-dashes in Quell
+        # descriptions become byte 0x97 in cp1252, which is invalid utf-8 — pytest
+        # then fails to parse the file and the test reports FAILS_ON_CORRECT for
+        # the wrong reason. This single line is the difference between
+        # verified=0 and verified>0 on Windows.
+        f.write_text(test.test_code, encoding="utf-8")
         return f
 
     def _backup(self, src: Path) -> Path:
@@ -131,9 +137,21 @@ class Verifier:
         if req.constraint_kind == ConstraintKind.BUG_REPRO:
             return  # already broken
 
-        src = req.target_file.read_text()
+        src = req.target_file.read_text(encoding="utf-8")
 
-        if req.constraint_kind == ConstraintKind.MUST_RAISE:
+        # All kinds whose test asserts `pytest.raises(...)` need the function's
+        # raises commented out to break the guard. Without this, step 3 runs
+        # the same code and the test passes again → DOESNT_CATCH_VIOLATION.
+        raise_based = {
+            ConstraintKind.MUST_RAISE,
+            ConstraintKind.NOT_NULL,
+            ConstraintKind.ENUM_VALID,
+            ConstraintKind.TYPE_CHECK,
+            ConstraintKind.AUTH_CHECK,
+            ConstraintKind.MAGIC_VALUE,
+            ConstraintKind.CUSTOM,
+        }
+        if req.constraint_kind in raise_based:
             modified = _violate_must_raise(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.BOUNDARY:
             modified = _violate_boundary(src, req.target_function)
@@ -152,9 +170,9 @@ class Verifier:
                 pass
             return
         else:
-            return  # CUSTOM — LLM handles injection in llm_engine
+            return
 
-        req.target_file.write_text(modified)
+        req.target_file.write_text(modified, encoding="utf-8")
 
     def _pytest(self, test_file: Path, src: Path) -> dict:  # type: ignore[type-arg]
         # Run from project root so all package imports resolve correctly.
@@ -234,10 +252,51 @@ def _violate_in_range(
 
 
 def _violate_must_raise(src: str, func_name: str) -> str:
-    return _violate_in_range(
-        src, func_name,
-        r'(\s+)(raise \w+)', r'\1# QUELL_VIOLATION \2',
-    )
+    """Replace every `raise X(...)` in func_name with `pass`.
+
+    AST-based — handles multi-line raises and never leaves an empty `if:` block.
+    Commenting out a raise (the old behaviour) produced IndentationError because
+    a bare comment doesn't satisfy Python's block requirement.
+    Replacing with `pass` keeps the syntax valid and breaks the guard so the
+    test's `pytest.raises(...)` no longer triggers.
+    """
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return src
+
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            if node.name == func_name:
+                target = node
+                break
+    if target is None:
+        return src
+
+    spans: list[tuple[int, int]] = []
+    for node in _ast.walk(target):
+        if isinstance(node, _ast.Raise):
+            start = node.lineno - 1
+            end = (node.end_lineno or node.lineno) - 1
+            spans.append((start, end))
+    if not spans:
+        return src
+
+    lines = src.splitlines(keepends=True)
+    for start, end in sorted(spans, key=lambda s: -s[0]):
+        if start >= len(lines):
+            continue
+        line = lines[start]
+        indent = line[: len(line) - len(line.lstrip())]
+        if line.endswith("\r\n"):
+            eol = "\r\n"
+        elif line.endswith("\n"):
+            eol = "\n"
+        else:
+            eol = ""
+        lines[start:end + 1] = [f"{indent}pass  # QUELL_VIOLATION{eol}"]
+    return "".join(lines)
 
 
 def _violate_boundary(src: str, func_name: str) -> str:

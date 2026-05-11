@@ -37,6 +37,7 @@ class RuleEngine:
             ConstraintKind.NOT_NULL,
             ConstraintKind.TYPE_CHECK,
             ConstraintKind.SILENT_FAIL,
+            ConstraintKind.MAGIC_VALUE,
         }
 
     def generate(self, req: Requirement) -> GeneratedTest | None:
@@ -46,6 +47,8 @@ class RuleEngine:
             return self._boundary(req)
         if req.constraint_kind == ConstraintKind.ENUM_VALID:
             return self._enum(req)
+        if req.constraint_kind == ConstraintKind.MAGIC_VALUE:
+            return self._magic_value(req)
         if req.constraint_kind == ConstraintKind.MUST_RETURN:
             return self._must_return(req)
         if req.constraint_kind == ConstraintKind.BUG_REPRO:
@@ -117,6 +120,13 @@ class RuleEngine:
         sig = sig_inspector.inspect(req.target_function, req.target_file)
         return sig is not None and sig.is_async
 
+    def _wrap_call(self, call: str, req: Requirement) -> str:
+        """Wrap a call expression with asyncio.run(...) if the target is async.
+        Sync stub calls on `async def` return a coroutine (no exception),
+        so the test must drive the coroutine for guards to actually fire.
+        """
+        return f"asyncio.run({call})" if self._is_async(req) else call
+
     def _import_line(self, req: Requirement) -> str:
         mod = sig_inspector.module_path(req.target_file)
         sig = sig_inspector.inspect(req.target_function, req.target_file)
@@ -140,17 +150,17 @@ class RuleEngine:
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
-        # Intentionally skip _setup_lines — we want Path stubs to point to
-        # non-existent files so the function actually raises (FileNotFoundError etc.)
         setup = ""
         name = self._name(req)
+        wrapped = self._wrap_call(call, req)
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
     import pytest
     {imp}
 {setup}    with pytest.raises({exc}):
-        {call}
+        {wrapped}
 """
         return GeneratedTest(
             requirement_id=req.id,
@@ -163,8 +173,6 @@ class RuleEngine:
         )
 
     def _boundary(self, req: Requirement) -> GeneratedTest | None:
-        if self._is_async(req):
-            return None
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
         setup = self._setup_lines(fixtures)
@@ -175,13 +183,15 @@ class RuleEngine:
             boundary_call = _inject_short_string(call, str(vi.get("variable", "")))
         else:
             boundary_call = _inject_boundary_value(call, req.description)
+        wrapped = self._wrap_call(boundary_call, req)
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
     import pytest
     {imp}
 {setup}    with pytest.raises(Exception):
-        {boundary_call}
+        {wrapped}
 """
         return GeneratedTest(
             requirement_id=req.id,
@@ -194,8 +204,6 @@ class RuleEngine:
         )
 
     def _enum(self, req: Requirement) -> GeneratedTest | None:
-        if self._is_async(req):
-            return None
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
         setup = self._setup_lines(fixtures)
@@ -208,13 +216,15 @@ class RuleEngine:
             vi = req.violation_input or {}
             enum_var = str(vi.get("variable", "value"))
             enum_call = _append_kwarg(call, f'{enum_var}="INVALID_VALUE"')
+        wrapped = self._wrap_call(enum_call, req)
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
     import pytest
     {imp}
 {setup}    with pytest.raises(Exception):
-        {enum_call}
+        {wrapped}
 """
         return GeneratedTest(
             requirement_id=req.id,
@@ -222,6 +232,49 @@ class RuleEngine:
             test_code=code,
             test_file_path=self._test_file(req),
             explanation=f"Enum violation: {req.description}",
+            generated_by="rule_engine",
+            unknown_types=unknown,
+        )
+
+    def _magic_value(self, req: Requirement) -> GeneratedTest | None:
+        """Test `if x == "MAGIC": raise` patterns by passing a non-magic value."""
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
+        name = self._name(req)
+
+        # Try to extract the variable name from the guard (left side of comparison)
+        raw = req.raw_spec_text or ""
+        m = re.search(r"if\s+(\w+)\s*(?:==|!=)\s*", raw)
+        var_name = m.group(1) if m else "value"
+
+        # Replace existing kwarg for the variable, else append
+        magic_call = re.sub(
+            rf"\b{re.escape(var_name)}\s*=\s*[^,)]+",
+            f'{var_name}="QUELL_NOT_MAGIC"',
+            call,
+            count=1,
+        )
+        if magic_call == call:
+            magic_call = re.sub(r'"test_value"', '"QUELL_NOT_MAGIC"', call, count=1)
+        if magic_call == call:
+            magic_call = _append_kwarg(call, f'{var_name}="QUELL_NOT_MAGIC"')
+        wrapped = self._wrap_call(magic_call, req)
+
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
+    import pytest
+    {imp}
+{setup}    with pytest.raises(Exception):
+        {wrapped}
+"""
+        return GeneratedTest(
+            requirement_id=req.id,
+            test_function_name=name,
+            test_code=code,
+            test_file_path=self._test_file(req),
+            explanation=f"Magic-value violation: {req.description}",
             generated_by="rule_engine",
             unknown_types=unknown,
         )
@@ -240,10 +293,12 @@ class RuleEngine:
         setup = self._setup_lines(fixtures)
         name = self._name(req)
 
+        wrapped = self._wrap_call(call, req)
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
     {imp}
-{setup}    result = {call}
+{setup}    result = {wrapped}
     assert result is not None
 """
         return GeneratedTest(
@@ -257,8 +312,6 @@ class RuleEngine:
         )
 
     def _not_null(self, req: Requirement) -> GeneratedTest | None:
-        if self._is_async(req):
-            return None  # async functions need await + pytest-asyncio + real fixtures
         # Self-attribute checks (if not self.x:) can't be tested by injecting a param
         if "self." in (req.raw_spec_text or ""):
             return None
@@ -300,12 +353,14 @@ class RuleEngine:
             if null_call == call and "=None" not in call:
                 null_call = _append_kwarg(call, "value=None")
 
+        wrapped = self._wrap_call(null_call, req)
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
     import pytest
     {imp}
 {setup}    with pytest.raises(Exception):
-        {null_call}
+        {wrapped}
 """
         return GeneratedTest(
             requirement_id=req.id,
@@ -327,13 +382,15 @@ class RuleEngine:
         type_call = re.sub(r"=\d+", '="invalid_type"', call, count=1)
         if type_call == call:
             type_call = _append_kwarg(call, 'value="invalid_type"')
+        wrapped = self._wrap_call(type_call, req)
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
     import pytest
     {imp}
 {setup}    with pytest.raises((TypeError, Exception)):
-        {type_call}
+        {wrapped}
 """
         return GeneratedTest(
             requirement_id=req.id,
@@ -346,8 +403,6 @@ class RuleEngine:
         )
 
     def _silent_fail(self, req: Requirement) -> GeneratedTest | None:
-        if self._is_async(req):
-            return None
         # Self-attribute silent fails (if not self.x: return None) need class instantiation
         if "self." in (req.raw_spec_text or ""):
             return None
@@ -365,10 +420,12 @@ class RuleEngine:
             # Only append if there's no existing None stub (Optional params already set =None)
             falsy_call = _append_kwarg(call, "value=None")
 
+        wrapped = self._wrap_call(falsy_call, req)
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: silent failure gap — {req.description} (should raise, currently returns None)\"\"\"
+    import asyncio
     {imp}
-{setup}    result = {falsy_call}
+{setup}    result = {wrapped}
     assert result is None  # documents silent return — gap: should raise but doesn't
 """
         return GeneratedTest(
@@ -388,6 +445,7 @@ class RuleEngine:
         name = self._name(req)
         inputs = str(req.violation_input) if req.violation_input else "see description"
         expected = req.expected_behavior or "should not silently accept invalid input"
+        wrapped = self._wrap_call(call, req)
 
         code = f"""def {name}{fixture_str}:
     \"\"\"
@@ -396,10 +454,11 @@ class RuleEngine:
     Expected: {expected}
     This test FAILS while the bug exists. Fix the code to make it pass.
     \"\"\"
+    import asyncio
     {imp}
 {setup}    import pytest
     with pytest.raises(Exception):
-        {call}
+        {wrapped}
 """
         return GeneratedTest(
             requirement_id=req.id,
