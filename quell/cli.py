@@ -493,10 +493,15 @@ def cmd_scan(
             )
         elif result.status == VerificationStatus.FAILS_ON_CORRECT:
             item["outcome"] = "rejected_fails_on_correct"
-            item["reason"] = (
+            # Surface the first meaningful line of the pytest output so the
+            # diagnostic report shows the REAL failure (ImportError, missing
+            # env var, app startup error, etc.) instead of a generic blurb.
+            err_snippet = _summarize_pytest_failure(result.error_message or "")
+            item["reason"] = err_snippet or (
                 "generated stub args trigger a different error on valid code — "
                 "function likely has complex/Pydantic args or depends on self state"
             )
+            item["pytest_output"] = (result.error_message or "")[-2000:]
             console.print(
                 f"  [red]Rejected — generated stub breaks valid code[/red] "
                 f"[dim](guard: {(req.raw_spec_text or '')[:50]!r})[/dim]"
@@ -510,6 +515,27 @@ def cmd_scan(
 
     # Always write report
     _write_scan_report(project_root, str(target), all_requirements, gaps, report_items, fixed)
+
+
+def _summarize_pytest_failure(out: str) -> str:
+    """Pull the most informative one-liner out of pytest's --tb=short output.
+
+    Looks for, in order: ModuleNotFoundError / ImportError / E lines / the
+    short test summary info. Falls back to the last non-empty line.
+    """
+    if not out:
+        return ""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    for ln in lines:
+        if ln.startswith(("ModuleNotFoundError", "ImportError", "AttributeError")):
+            return ln[:180]
+    for ln in lines:
+        if ln.startswith("E   ") and "assert" not in ln:
+            return ln[4:][:180]
+    for ln in lines:
+        if "Error" in ln and ":" in ln:
+            return ln[:180]
+    return lines[-1][:180] if lines else ""
 
 
 def _write_scan_report(

@@ -70,10 +70,15 @@ class Verifier:
             # Step 1: test must PASS on correct code
             orig = self._pytest(temp, req.target_file)
             if not orig["passed"]:
+                # pytest writes failure details to stdout in --tb=short mode;
+                # stderr is mostly empty unless the subprocess itself crashed.
+                # Capture both so the diagnostic surfaces the real reason
+                # (ImportError, missing env var, app startup failure, etc.).
+                combined = (orig.get("stdout", "") or "") + "\n" + (orig.get("stderr", "") or "")
                 return VerificationResult(
                     requirement_id=req.id, generated_test=test,
                     status=VerificationStatus.FAILS_ON_CORRECT,
-                    error_message=orig.get("stderr", ""),
+                    error_message=combined.strip(),
                     duration_ms=self._ms(start),
                 )
 
