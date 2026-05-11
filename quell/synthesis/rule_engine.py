@@ -91,21 +91,31 @@ class RuleEngine:
         call_args, fixtures, unknown = sig_inspector.stub_for_call(sig)
 
         if sig.is_method and sig.class_name:
-            # Inspect __init__ to build instantiation
-            init_sig = sig_inspector.inspect_init(sig.class_name, req.target_file)
-            if init_sig is not None and init_sig.required_params:
-                init_args, init_fix, init_unk = sig_inspector.stub_for_call(init_sig)
-                fixtures.extend(init_fix)
-                unknown.extend(init_unk)
-                inst = f"{sig.class_name}({init_args})"
+            if sig.is_classmethod:
+                # Classmethods (including Pydantic @validator): call on the class directly,
+                # Python auto-passes cls — no construction needed, no Pydantic validation.
+                call = f"{sig.class_name}.{func}({call_args})"
             else:
-                inst = f"{sig.class_name}()"
-            call = f"{inst}.{func}({call_args})"
+                # Inspect __init__ to build instantiation
+                init_sig = sig_inspector.inspect_init(sig.class_name, req.target_file)
+                if init_sig is not None and init_sig.required_params:
+                    init_args, init_fix, init_unk = sig_inspector.stub_for_call(init_sig)
+                    fixtures.extend(init_fix)
+                    unknown.extend(init_unk)
+                    inst = f"{sig.class_name}({init_args})"
+                else:
+                    inst = f"{sig.class_name}()"
+                call = f"{inst}.{func}({call_args})"
         else:
             call = f"{func}({call_args})"
 
         fixture_str = f"({', '.join(dict.fromkeys(fixtures))})" if fixtures else "()"
         return call, fixture_str, list(dict.fromkeys(fixtures)), unknown
+
+    def _is_async(self, req: Requirement) -> bool:
+        """Return True if the target function is async def."""
+        sig = sig_inspector.inspect(req.target_function, req.target_file)
+        return sig is not None and sig.is_async
 
     def _import_line(self, req: Requirement) -> str:
         mod = sig_inspector.module_path(req.target_file)
@@ -152,7 +162,9 @@ class RuleEngine:
             unknown_types=unknown,
         )
 
-    def _boundary(self, req: Requirement) -> GeneratedTest:
+    def _boundary(self, req: Requirement) -> GeneratedTest | None:
+        if self._is_async(req):
+            return None
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
         setup = self._setup_lines(fixtures)
@@ -181,7 +193,9 @@ class RuleEngine:
             unknown_types=unknown,
         )
 
-    def _enum(self, req: Requirement) -> GeneratedTest:
+    def _enum(self, req: Requirement) -> GeneratedTest | None:
+        if self._is_async(req):
+            return None
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
         setup = self._setup_lines(fixtures)
@@ -190,8 +204,10 @@ class RuleEngine:
         # Replace the first string arg with an invalid enum value
         enum_call = re.sub(r'"test_value"', '"INVALID_VALUE"', call, count=1)
         if enum_call == call:
-            # No string stub to replace — append an invalid kwarg
-            enum_call = _append_kwarg(call, 'currency="INVALID_VALUE"')
+            # No string stub to replace — append an invalid kwarg using the actual variable name
+            vi = req.violation_input or {}
+            enum_var = str(vi.get("variable", "value"))
+            enum_call = _append_kwarg(call, f'{enum_var}="INVALID_VALUE"')
 
         code = f"""def {name}{fixture_str}:
     \"\"\"Quell: {req.description}\"\"\"
@@ -241,6 +257,8 @@ class RuleEngine:
         )
 
     def _not_null(self, req: Requirement) -> GeneratedTest | None:
+        if self._is_async(req):
+            return None  # async functions need await + pytest-asyncio + real fixtures
         # Self-attribute checks (if not self.x:) can't be tested by injecting a param
         if "self." in (req.raw_spec_text or ""):
             return None
@@ -278,7 +296,7 @@ class RuleEngine:
             null_call = re.sub(r'="test_value"', "=None", call, count=1)
             if null_call == call:
                 null_call = re.sub(r"=\d+", "=None", call, count=1)
-            if null_call == call:
+            if null_call == call and "=None" not in call:
                 null_call = _append_kwarg(call, "value=None")
 
         code = f"""def {name}{fixture_str}:
@@ -327,6 +345,8 @@ class RuleEngine:
         )
 
     def _silent_fail(self, req: Requirement) -> GeneratedTest | None:
+        if self._is_async(req):
+            return None
         # Self-attribute silent fails (if not self.x: return None) need class instantiation
         if "self." in (req.raw_spec_text or ""):
             return None
@@ -340,7 +360,8 @@ class RuleEngine:
         falsy_call = re.sub(r'="test_value"', "=None", call, count=1)
         if falsy_call == call:
             falsy_call = re.sub(r"=\d+", "=0", call, count=1)
-        if falsy_call == call:
+        if falsy_call == call and "=None" not in call:
+            # Only append if there's no existing None stub (Optional params already set =None)
             falsy_call = _append_kwarg(call, "value=None")
 
         code = f"""def {name}{fixture_str}:

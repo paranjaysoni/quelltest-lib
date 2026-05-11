@@ -1,0 +1,45 @@
+# Quelltest
+
+> Verified test generation for Python. Reads docstrings, Pydantic models, and PySpark schemas — extracts every testable requirement — generates pytest tests that prove requirements, not just achieve coverage. Formerly known as Quell.
+
+Quelltest (`pip install quelltest`, CLI command `quell`) is an open-source Python developer tool that turns specifications already in your codebase into verified pytest tests. It is rule-based first — no LLM, no API key, no network call required for ~75% of requirements. The remaining 25% use an LLM fallback only if you configure one.
+
+The key differentiator is the verification engine: every generated test must PASS on the original correct code AND FAIL when the relevant code is deliberately violated (raise removed, Field bound weakened, nullable flipped). Only proven tests are written to disk.
+
+## Docs
+
+- [Introduction](https://quell.buildsbyshashank.tech/docs): What Quelltest is
+- [Quickstart](https://quell.buildsbyshashank.tech/docs/quickstart): Install and run in 2 minutes
+- [How It Works](https://quell.buildsbyshashank.tech/docs/how-it-works): Pipeline and verification engine
+- [CLI Reference](https://quell.buildsbyshashank.tech/docs/cli/check): All commands
+- [CI/CD Guide](https://quell.buildsbyshashank.tech/docs/guides/ci-cd): GitHub Actions integration
+- [SDK Reference](https://quell.buildsbyshashank.tech/docs/sdk/overview): Python API
+- [Constraint Kinds](https://quell.buildsbyshashank.tech/docs/reference/constraint-kinds): MUST_RAISE, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK, MUST_RETURN
+
+## Install
+
+```
+pip install quelltest
+```
+
+## Quick example
+
+```
+quell check src/ --fix --no-llm
+```
+
+## Key facts
+
+- Package: quelltest (PyPI)
+- CLI command: quell
+- GitHub: https://github.com/shashank7109/quelltest_lib
+- Website: https://quell.buildsbyshashank.tech
+- License: MIT
+- Author: Shashank Bindal
+- Version: 0.6.9
+- Formerly known as: Quell
+- Python: 3.11+
+- Spec sources: Python docstrings, Pydantic v2 Field constraints, PySpark StructType
+- Constraint kinds: MUST_RAISE, MUST_RETURN, BOUNDARY, ENUM_VALID, NOT_NULL, TYPE_CHECK
+- LLM required: No (rule engine handles ~75%)
+- LLM providers: Anthropic Claude, OpenAI GPT-4, Ollama
