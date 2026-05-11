@@ -32,6 +32,7 @@ ABSOLUTE RULES — never violate:
 from __future__ import annotations
 
 import ast as _ast
+import os
 import re
 import shutil
 import subprocess
@@ -184,13 +185,14 @@ class Verifier:
         # Run from project root so all package imports resolve correctly.
         # Fall back to sig_inspector's finder, then src.parent.parent.
         cwd = self._resolve_cwd(src)
+        # Build env: start from the parent shell's env (which subprocess would
+        # inherit by default), then layer in any .env file at the project root.
+        # This makes Quell behave like the user running `python -m pytest`
+        # themselves after a normal shell + dotenv setup. Nothing leaves the
+        # machine — this is the same env the user already has access to.
+        env = os.environ.copy()
+        env.update(_load_dotenv(cwd))
         try:
-            # sys.executable: ensures the subprocess uses the SAME interpreter that
-            # is running Quell, so the user's installed deps are visible to pytest.
-            # Hardcoded "python" on Windows can hit the MS Store alias or a different
-            # env without the app's deps → ImportError → step 1 fails for the wrong reason.
-            # encoding="utf-8": pytest emits utf-8; without this, text=True decodes
-            # with cp1252 on Windows and crashes on em-dashes in the output.
             r = subprocess.run(
                 [sys.executable, "-m", "pytest", str(test_file),
                  "-v", "--tb=short", "-q", "--no-header"],
@@ -198,6 +200,7 @@ class Verifier:
                 encoding="utf-8", errors="replace",
                 timeout=self.config.verification_timeout_seconds,
                 cwd=cwd,
+                env=env,
             )
             return {
                 "passed": r.returncode == 0,
@@ -222,6 +225,40 @@ class Verifier:
 
     def _ms(self, start: float) -> int:
         return int((time.time() - start) * 1000)
+
+
+# ── env handling ─────────────────────────────────────────────────────────────
+
+def _load_dotenv(cwd: Path) -> dict[str, str]:
+    """Read .env at `cwd` and return its KEY=VALUE pairs as a dict.
+
+    Minimal parser — no python-dotenv dependency. Skips comments and blank
+    lines; supports `KEY=VALUE`, `KEY="VALUE"`, `KEY='VALUE'`. Returns {}
+    if the file doesn't exist or is unreadable. Never raises.
+    """
+    env_file = cwd / ".env"
+    if not env_file.exists():
+        return {}
+    try:
+        text = env_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum():
+            continue
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            value = value[1:-1]
+        out[key] = value
+    return out
 
 
 # ── targeted violation helpers ────────────────────────────────────────────────
