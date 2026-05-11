@@ -289,7 +289,8 @@ class RuleEngine:
                 call,
                 count=1,
             )
-            if null_call == call:
+            # Only append if the param isn't already =None (prevents duplicate kwargs)
+            if null_call == call and f"{null_param}=None" not in call:
                 null_call = _append_kwarg(call, f"{null_param}=None")
         else:
             # Replace first string or numeric stub with None
@@ -365,13 +366,10 @@ class RuleEngine:
             falsy_call = _append_kwarg(call, "value=None")
 
         code = f"""def {name}{fixture_str}:
-    \"\"\"Quell: {req.description}\"\"\"
-    import pytest
+    \"\"\"Quell: silent failure gap — {req.description} (should raise, currently returns None)\"\"\"
     {imp}
-{setup}    # This function returns None silently instead of raising.
-    # The test proves the gap: it should raise but currently doesn't.
-    with pytest.raises(Exception):
-        {falsy_call}
+{setup}    result = {falsy_call}
+    assert result is None  # documents silent return — gap: should raise but doesn't
 """
         return GeneratedTest(
             requirement_id=req.id,

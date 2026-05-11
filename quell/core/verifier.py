@@ -139,6 +139,8 @@ class Verifier:
             modified = _violate_boundary(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.MUST_RETURN:
             modified = _violate_must_return(src, req.target_function)
+        elif req.constraint_kind == ConstraintKind.SILENT_FAIL:
+            modified = _violate_silent_fail(src, req.target_function)
         elif req.constraint_kind == ConstraintKind.MUTATION:
             try:
                 subprocess.run(
@@ -253,4 +255,14 @@ def _violate_must_return(src: str, func_name: str) -> str:
         r'return (?!None\b)',
         'return None  # QUELL_VIOLATION ',
         count=0,
+    )
+
+
+def _violate_silent_fail(src: str, func_name: str) -> str:
+    # Change the first silent `return None` to a raise so the gap test fails.
+    return _violate_in_range(
+        src, func_name,
+        r'\breturn None\b',
+        'raise ValueError("quell_violation")',
+        count=1,
     )
