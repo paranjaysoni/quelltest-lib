@@ -50,6 +50,44 @@ from quell.core.models import (
 )
 
 
+def _resolve_pytest_cmd() -> list[str]:
+    """Return the best available pytest invocation (result is module-cached).
+
+    Priority:
+      1. sys.executable -m pytest  — same interpreter as Quell; works when
+         pytest is installed in the active venv (the common case).
+      2. pytest / py.test from PATH — fallback for conda/system setups where
+         quell and pytest live in different environments (e.g. quelltest
+         installed in ai_env but pytest only available on PATH).
+    """
+    global _PYTEST_CMD_CACHE
+    if _PYTEST_CMD_CACHE is not None:
+        return _PYTEST_CMD_CACHE
+
+    # Fast-path: check if pytest is importable in the current interpreter.
+    probe = subprocess.run(
+        [sys.executable, "-c", "import pytest"],
+        capture_output=True,
+    )
+    if probe.returncode == 0:
+        _PYTEST_CMD_CACHE = [sys.executable, "-m", "pytest"]
+        return _PYTEST_CMD_CACHE
+
+    # Fallback: find pytest executable anywhere on PATH.
+    for exe in ("pytest", "py.test"):
+        found = shutil.which(exe)
+        if found:
+            _PYTEST_CMD_CACHE = [found]
+            return _PYTEST_CMD_CACHE
+
+    # Last resort: try anyway and let the error surface naturally.
+    _PYTEST_CMD_CACHE = [sys.executable, "-m", "pytest"]
+    return _PYTEST_CMD_CACHE
+
+
+_PYTEST_CMD_CACHE: list[str] | None = None
+
+
 class Verifier:
     """Proves every generated test actually catches violations before writing."""
 
@@ -183,19 +221,13 @@ class Verifier:
 
     def _pytest(self, test_file: Path, src: Path) -> dict:  # type: ignore[type-arg]
         # Run from project root so all package imports resolve correctly.
-        # Fall back to sig_inspector's finder, then src.parent.parent.
         cwd = self._resolve_cwd(src)
-        # Build env: start from the parent shell's env (which subprocess would
-        # inherit by default), then layer in any .env file at the project root.
-        # This makes Quell behave like the user running `python -m pytest`
-        # themselves after a normal shell + dotenv setup. Nothing leaves the
-        # machine — this is the same env the user already has access to.
         env = os.environ.copy()
         env.update(_load_dotenv(cwd))
+        cmd = _resolve_pytest_cmd()
         try:
             r = subprocess.run(
-                [sys.executable, "-m", "pytest", str(test_file),
-                 "-v", "--tb=short", "-q", "--no-header"],
+                cmd + [str(test_file), "-v", "--tb=short", "-q", "--no-header"],
                 capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
                 timeout=self.config.verification_timeout_seconds,
