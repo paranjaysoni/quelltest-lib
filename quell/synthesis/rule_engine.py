@@ -38,6 +38,7 @@ class RuleEngine:
             ConstraintKind.TYPE_CHECK,
             ConstraintKind.SILENT_FAIL,
             ConstraintKind.MAGIC_VALUE,
+            ConstraintKind.CUSTOM,
         }
 
     def generate(self, req: Requirement) -> GeneratedTest | None:
@@ -59,6 +60,8 @@ class RuleEngine:
             return self._type_check(req)
         if req.constraint_kind == ConstraintKind.SILENT_FAIL:
             return self._silent_fail(req)
+        if req.constraint_kind == ConstraintKind.CUSTOM:
+            return self._custom(req)
         return None
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -470,6 +473,39 @@ class RuleEngine:
             test_code=code,
             test_file_path=self._test_file(req),
             explanation=f"Bug reproduction: {req.description}",
+            generated_by="rule_engine",
+            unknown_types=unknown,
+        )
+
+    def _custom(self, req: Requirement) -> GeneratedTest | None:
+        """Fallback generator for CUSTOM guards (compound conditions, asserts, etc.).
+
+        Generates a pytest.raises(Exception) test. The verifier will reject it if
+        the guard can't be triggered — only genuinely provable guards pass through.
+        """
+        if "self." in (req.raw_spec_text or ""):
+            return None  # attribute guards need class instantiation we can't stub
+
+        call, fixture_str, fixtures, unknown = self._sig_info(req)
+        imp = self._import_line(req)
+        setup = self._setup_lines(fixtures)
+        name = self._name(req)
+        wrapped = self._wrap_call(call, req)
+
+        code = f"""def {name}{fixture_str}:
+    \"\"\"Quell: {req.description}\"\"\"
+    import asyncio
+    import pytest
+    {imp}
+{setup}    with pytest.raises(Exception):
+        {wrapped}
+"""
+        return GeneratedTest(
+            requirement_id=req.id,
+            test_function_name=name,
+            test_code=code,
+            test_file_path=self._test_file(req),
+            explanation=f"Custom guard: {req.description}",
             generated_by="rule_engine",
             unknown_types=unknown,
         )

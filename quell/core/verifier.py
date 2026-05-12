@@ -421,6 +421,12 @@ def _violate_must_raise(src: str, func_name: str) -> str:
             start = node.lineno - 1
             end = (node.end_lineno or node.lineno) - 1
             spans.append((start, end))
+        elif isinstance(node, _ast.Assert):
+            # `assert condition` raises AssertionError when False.
+            # Replace with pass so the CUSTOM guard violation is visible.
+            start = node.lineno - 1
+            end = (node.end_lineno or node.lineno) - 1
+            spans.append((start, end))
     if not spans:
         return src
 
