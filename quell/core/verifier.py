@@ -465,10 +465,13 @@ def _violate_must_return(src: str, func_name: str) -> str:
 
 
 def _violate_silent_fail(src: str, func_name: str) -> str:
-    # Change the first silent `return None` to a raise so the gap test fails.
+    # Change the first silent return to a raise so the gap test fails.
+    # Matches both `return None` and bare `return` (which also returns None implicitly).
+    # The lookahead (?=\s*(?:#[^\n]*)?\n|$) ensures we only match at end-of-line
+    # so we don't accidentally mangle `return something_else`.
     return _violate_in_range(
         src, func_name,
-        r'\breturn None\b',
+        r'\breturn(?:\s+None\b|\s*(?=#[^\n]*\n|\n|$))',
         'raise ValueError("quell_violation")',
         count=1,
     )

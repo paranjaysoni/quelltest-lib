@@ -91,7 +91,7 @@ class RuleEngine:
         if sig is None:
             # No signature found — generate a minimal stub
             call = f"{func}()"
-            return call, "", fixtures, [f"sig_not_found:{func}"]
+            return call, "()", fixtures, [f"sig_not_found:{func}"]
 
         call_args, fixtures, unknown = sig_inspector.stub_for_call(sig)
 
@@ -437,12 +437,30 @@ class RuleEngine:
         setup = self._setup_lines(fixtures)
         name = self._name(req)
 
-        # Replace first string/numeric stub with None or falsy value
+        # Replace first stub value with None/falsy. Try in order of specificity so
+        # we hit the most likely guard variable first and never produce a duplicate kwarg.
         falsy_call = re.sub(r'="test_value"', "=None", call, count=1)
         if falsy_call == call:
-            falsy_call = re.sub(r"=\d+", "=0", call, count=1)
+            falsy_call = re.sub(r"=\d+", "=None", call, count=1)
+        # Also handle collection stubs ({}, [], (), set()) — e.g. value: dict
+        for coll_pat in (r"=\{\}", r"=\[\]", r"=\(\)", r"=set\(\)"):
+            if falsy_call != call:
+                break
+            falsy_call = re.sub(coll_pat, "=None", call, count=1)
+        if falsy_call == call:
+            # Try to replace the specific guard variable from violation_input
+            if req.violation_input:
+                for k in req.violation_input:
+                    if re.search(rf"\b{re.escape(k)}\s*=", call):
+                        falsy_call = re.sub(
+                            rf"\b{re.escape(k)}\s*=\s*[^,)]+",
+                            f"{k}=None",
+                            call,
+                            count=1,
+                        )
+                        break
         if falsy_call == call and "=None" not in call:
-            # Only append if there's no existing None stub (Optional params already set =None)
+            # Only append if there's no existing None stub and no param was found above
             falsy_call = _append_kwarg(call, "value=None")
 
         wrapped = self._wrap_call(falsy_call, req)

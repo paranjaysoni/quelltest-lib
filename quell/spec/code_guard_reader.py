@@ -99,12 +99,38 @@ class CodeGuardReader:
             return []
 
         requirements: list[Requirement] = []
-        for node in ast.walk(tree):
+        # Only scan module-level and direct class-method functions.
+        # ast.walk would recurse into nested (inner) functions — those can't be
+        # imported directly and their guards are closure-specific, not testable
+        # in isolation. Guards *inside* nested functions are also excluded from
+        # their outer function's scan (see _walk_func_body).
+        for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                requirements.extend(
-                    self._scan_function(node, file_path, source)
-                )
+                requirements.extend(self._scan_function(node, file_path, source))
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        requirements.extend(self._scan_function(item, file_path, source))
         return requirements
+
+    @staticmethod
+    def _walk_func_body(
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+    ):
+        """Yield all AST nodes inside func without descending into nested functions.
+
+        ast.walk recurses into every node including inner function definitions,
+        which causes guards inside nested functions to be mis-attributed to the
+        outer function and makes the inner function appear as a top-level target.
+        This iterator stops at nested FunctionDef/AsyncFunctionDef boundaries.
+        """
+        from collections import deque
+        todo: deque[ast.AST] = deque(ast.iter_child_nodes(func))
+        while todo:
+            node = todo.popleft()
+            yield node
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                todo.extend(ast.iter_child_nodes(node))
 
     def _scan_function(
         self,
@@ -131,7 +157,7 @@ class CodeGuardReader:
         # double-count them as "standalone" raises below.
         claimed_raise_linenos: set[int] = set()
 
-        for node in ast.walk(func):
+        for node in self._walk_func_body(func):
             # Pattern 1, 2, 3, 5, 6: if <condition>: raise
             if isinstance(node, ast.If):
                 raise_nodes = [
