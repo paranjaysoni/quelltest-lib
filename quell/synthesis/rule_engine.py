@@ -384,7 +384,7 @@ class RuleEngine:
             if null_call == call:
                 null_call = re.sub(r"=\d+", "=None", call, count=1)
             if null_call == call and "=None" not in call:
-                null_call = _append_kwarg(call, "value=None")
+                return None  # can't determine which param to nullify — skip
 
         wrapped = self._wrap_call(null_call, req)
         code = f"""def {name}{fixture_str}:
@@ -468,8 +468,7 @@ class RuleEngine:
                         )
                         break
         if falsy_call == call and "=None" not in call:
-            # Only append if there's no existing None stub and no param was found above
-            falsy_call = _append_kwarg(call, "value=None")
+            return None  # can't determine which param to make falsy — skip
 
         wrapped = self._wrap_call(falsy_call, req)
         code = f"""def {name}{fixture_str}:
@@ -529,6 +528,20 @@ class RuleEngine:
         """
         if "self." in (req.raw_spec_text or ""):
             return None  # attribute guards need class instantiation we can't stub
+
+        raw = req.raw_spec_text or ""
+        # Guards that check module-level state (assert ujson is not None,
+        # assert __version__, assert parse_options_header) cannot be triggered
+        # by injecting function arguments — they depend on installed packages.
+        if re.search(r"assert\s+\w+\s+is not None\s*$", raw) or re.search(
+            r"assert\s+__\w+__\s*$", raw
+        ) or re.search(r"assert\s+\w+\s*$", raw.split(",")[0].strip()):
+            # Only skip if the asserted name is not a parameter of the function
+            sig = sig_inspector.inspect(req.target_function, req.target_file)
+            param_names = {p.name for p in sig.callable_params} if sig else set()
+            m = re.match(r"assert\s+(\w+)", raw)
+            if m and m.group(1) not in param_names:
+                return None  # module-level state check — can't inject via stub
 
         call, fixture_str, fixtures, unknown = self._sig_info(req)
         imp = self._import_line(req)
